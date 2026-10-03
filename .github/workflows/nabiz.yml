@@ -1,0 +1,104 @@
+name: Sunucu nabzi
+
+# Aura sunucusu (tek VPS) tamamen duserse e-posta almak icin.
+# Kontrol sunucunun DISINDAN (GitHub'in makinelerinden) yapilir; n8n gibi
+# sunucunun icindeki bir izleyici sunucu dusunce kendisi de susar.
+# Is basarisiz olunca GitHub, deponun sahibine otomatik e-posta gonderir.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # 10 dakikada bir (GitHub yogunlukta birkac dk geciktirebilir)
+    - cron: '17 6 1 * *'     # ayda bir: canli tutma commit'i (asagida)
+  workflow_dispatch:
+    inputs:
+      deneme_hatasi:
+        description: 'E-posta bildirimini denemek icin bilerek basarisiz ol'
+        type: boolean
+        default: false
+      teshis:
+        description: 'Her siteyi tek tek dene ve sonucu yaz (alarm uretmez)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nabiz
+  cancel-in-progress: false
+
+jobs:
+  kontrol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deneme hatasi
+        if: ${{ inputs.deneme_hatasi }}
+        run: |
+          echo "::error title=DENEME::Bu bir deneme. Bu e-posta geldiyse bildirim calisiyor."
+          exit 1
+
+      - name: Sunucu ayakta mi
+        env:
+          # Ayni sunucudaki sitelerin adresleri, bosluk ya da satirla ayrilmis.
+          # Depo herkese acik oldugu icin adresler dosyada degil, secret'ta;
+          # loglara da yalnizca sira numarasi yaziliyor.
+          SITELER: ${{ secrets.SITELER }}
+          TESHIS: ${{ inputs.teshis }}
+        run: |
+          read -r -a siteler <<< "$(echo $SITELER)"
+          if [ "${#siteler[@]}" -eq 0 ]; then
+            echo "::error::SITELER secret'i bos"; exit 1
+          fi
+
+          # Teshis: her siteyi bir kez dene; Cloudflare'in bot sayfasi
+          # (cf-mitigated basligi) GitHub'in makinelerine donuyor mu gor.
+          if [ "$TESHIS" = "true" ]; then
+            i=0
+            for s in "${siteler[@]}"; do
+              i=$((i+1))
+              h=$(curl -sL -D - -o /dev/null -m 25 -w 'SON %{http_code} %{time_total}\n' "${s}?nabiz=$(date +%s%N)" || true)
+              son=$(printf '%s\n' "$h" | grep '^SON ' | tail -n1 || true)
+              bot=$(printf '%s\n' "$h" | grep -ci '^cf-mitigated:' || true)
+              echo "site $i: ${son#SON } sn, cf-mitigated=${bot:-0}"
+            done
+            exit 0
+          fi
+
+          # Siteler ayni sunucuda: BIRI bile 2xx donerse sunucu ayakta demektir.
+          # Tek bir sitenin kendi sorunu bilerek alarm sayilmiyor.
+          # Uc tur, aralarinda 60 sn: anlik ag dalgalanmasi alarm uretmesin.
+          # Yalnizca 2xx kabul: Cloudflare'in kendi yonlendirmesi (3xx) ya da
+          # bot sayfasi (403/503) sunucu kapaliyken de donebilir. ?nabiz=...
+          # her istegi tekil yapar, Cloudflare onbellegi cevap veremez.
+          for tur in 1 2 3; do
+            i=0
+            for s in "${siteler[@]}"; do
+              i=$((i+1))
+              sonuc=$(curl -sL -o /dev/null -m 25 -w '%{http_code} %{time_total}' "${s}?nabiz=$(date +%s%N)" || true)
+              kod=${sonuc%% *}
+              echo "tur $tur, site $i: ${kod:-000} (${sonuc#* } sn)"
+              case "$kod" in 2??) echo "Sunucu ayakta."; exit 0 ;; esac
+            done
+            if [ "$tur" -lt 3 ]; then sleep 60; fi
+          done
+          echo "::error title=Aura sunucusu yanit vermiyor::Uc turda (yaklasik 3-5 dk) hicbir siteden 2xx alinamadi."
+          exit 1
+
+  canli-tut:
+    # GitHub, 60 gun commit almayan herkese acik depolarda zamanlanmis isleri
+    # durdurur. Ayda bir kucuk commit bunu onler.
+    if: github.event.schedule == '17 6 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > .canli-tut
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .canli-tut
+          git commit -m 'canli tut'
+          git push
