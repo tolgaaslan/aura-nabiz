@@ -40,49 +40,58 @@ jobs:
 
       - name: Sunucu ayakta mi
         env:
-          # Ayni sunucudaki sitelerin adresleri, bosluk ya da satirla ayrilmis.
-          # Depo herkese acik oldugu icin adresler dosyada degil, secret'ta;
-          # loglara da yalnizca sira numarasi yaziliyor.
+          # Ayni sunucudaki sitelerin adresleri (bosluk ya da satirla ayrilmis)
+          # ve sunucunun IP'si. Depo herkese acik oldugu icin ikisi de secret'ta;
+          # loglara yalnizca sira numarasi yaziliyor.
           SITELER: ${{ secrets.SITELER }}
+          SUNUCU_IP: ${{ secrets.SUNUCU_IP }}
           TESHIS: ${{ inputs.teshis }}
         run: |
           read -r -a siteler <<< "$(echo $SITELER)"
-          if [ "${#siteler[@]}" -eq 0 ]; then
-            echo "::error::SITELER secret'i bos"; exit 1
+          if [ "${#siteler[@]}" -eq 0 ] || [ -z "$SUNUCU_IP" ]; then
+            echo "::error::SITELER ya da SUNUCU_IP secret'i bos"; exit 1
           fi
 
-          # Teshis: her siteyi bir kez dene; Cloudflare'in bot sayfasi
-          # (cf-mitigated basligi) GitHub'in makinelerine donuyor mu gor.
+          # Istekler Cloudflare'i ATLAYIP dogrudan sunucuya gider (--resolve).
+          # Sebep: Cloudflare'in bot korumasi GitHub'in makinelerine kendi 403
+          # sayfasini donduruyor (cf-mitigated) ve o sayfa sunucu kapaliyken de
+          # gelir. Sertifika yine dogrulaniyor (sunucuda Let's Encrypt var).
+          dogrudan() {  # $1 = adres  ->  "kod sure"
+            local host=${1#*://}; host=${host%%/*}
+            curl -s -o /dev/null -m 25 --resolve "$host:443:$SUNUCU_IP" \
+              -w '%{http_code} %{time_total}' "${1}?nabiz=$(date +%s%N)" || true
+          }
+
+          # Teshis: her siteyi hem dogrudan hem Cloudflare uzerinden bir kez dene.
           if [ "$TESHIS" = "true" ]; then
             i=0
             for s in "${siteler[@]}"; do
               i=$((i+1))
-              h=$(curl -sL -D - -o /dev/null -m 25 -w 'SON %{http_code} %{time_total}\n' "${s}?nabiz=$(date +%s%N)" || true)
-              son=$(printf '%s\n' "$h" | grep '^SON ' | tail -n1 || true)
-              bot=$(printf '%s\n' "$h" | grep -ci '^cf-mitigated:' || true)
-              echo "site $i: ${son#SON } sn, cf-mitigated=${bot:-0}"
+              cf=$(curl -sL -D - -o /dev/null -m 25 -w 'SON %{http_code}\n' "${s}?nabiz=$(date +%s%N)" || true)
+              cf_kod=$(printf '%s\n' "$cf" | grep '^SON ' | tail -n1 || true)
+              bot=$(printf '%s\n' "$cf" | grep -ci '^cf-mitigated:' || true)
+              echo "site $i: sunucu=$(dogrudan "$s") sn | cloudflare=${cf_kod#SON } cf-mitigated=${bot:-0}"
             done
             exit 0
           fi
 
-          # Siteler ayni sunucuda: BIRI bile 2xx donerse sunucu ayakta demektir.
-          # Tek bir sitenin kendi sorunu bilerek alarm sayilmiyor.
-          # Uc tur, aralarinda 60 sn: anlik ag dalgalanmasi alarm uretmesin.
-          # Yalnizca 2xx kabul: Cloudflare'in kendi yonlendirmesi (3xx) ya da
-          # bot sayfasi (403/503) sunucu kapaliyken de donebilir. ?nabiz=...
-          # her istegi tekil yapar, Cloudflare onbellegi cevap veremez.
+          # Siteler ayni sunucuda: BIRI bile cevap verirse sunucu ayakta demektir.
+          # Tek bir sitenin kendi sorunu bilerek alarm sayilmiyor. Cevap dogrudan
+          # sunucudan geldigi icin 2xx de 3xx de "ayakta" demek. ?nabiz=... her
+          # istegi tekil yapar. Uc tur, aralarinda 60 sn: anlik ag dalgalanmasi
+          # alarm uretmesin.
           for tur in 1 2 3; do
             i=0
             for s in "${siteler[@]}"; do
               i=$((i+1))
-              sonuc=$(curl -sL -o /dev/null -m 25 -w '%{http_code} %{time_total}' "${s}?nabiz=$(date +%s%N)" || true)
+              sonuc=$(dogrudan "$s")
               kod=${sonuc%% *}
               echo "tur $tur, site $i: ${kod:-000} (${sonuc#* } sn)"
-              case "$kod" in 2??) echo "Sunucu ayakta."; exit 0 ;; esac
+              case "$kod" in 2??|3??) echo "Sunucu ayakta."; exit 0 ;; esac
             done
             if [ "$tur" -lt 3 ]; then sleep 60; fi
           done
-          echo "::error title=Aura sunucusu yanit vermiyor::Uc turda (yaklasik 3-5 dk) hicbir siteden 2xx alinamadi."
+          echo "::error title=Aura sunucusu yanit vermiyor::Uc turda (yaklasik 3-5 dk) hicbir siteden yanit alinamadi."
           exit 1
 
   canli-tut:
