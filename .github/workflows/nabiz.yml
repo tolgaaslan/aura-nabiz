@@ -7,7 +7,7 @@ name: Sunucu nabzi
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # 10 dakikada bir (GitHub yogunlukta birkac dk geciktirebilir)
+    - cron: '3-59/10 * * * *'  # 10 dakikada bir, :03 :13 ... (saat baslari GitHub'da en yogun an; orada isler dusebiliyor)
     - cron: '17 6 1 * *'     # ayda bir: canli tutma commit'i (asagida)
   workflow_dispatch:
     inputs:
